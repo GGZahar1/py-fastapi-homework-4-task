@@ -1,6 +1,5 @@
-
 from config import get_jwt_auth_manager, get_s3_storage_client
-from exceptions import BaseSecurityError, BaseS3Error
+from exceptions import BaseSecurityError, BaseS3Error, S3ConnectionError, S3FileUploadError
 from fastapi import (
     APIRouter,
     Depends,
@@ -11,7 +10,6 @@ from fastapi import (
     UploadFile,
 )
 from pydantic import ValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.exceptions import RequestValidationError
 from datetime import date
 
@@ -108,10 +106,7 @@ async def create_profile(
     avatar_key = f"avatars/{user_id}_{avatar.filename}"
 
     try:
-        await s3_client.upload_file(
-            avatar_key,
-            avatar_content,
-        )
+        await s3_client.upload_file(avatar_key, avatar_content)
     except BaseS3Error:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -126,13 +121,22 @@ async def create_profile(
         **profile_fields,
     )
 
-    db.add(profile)
-    await db.commit()
-    await db.refresh(profile)
+    try:
+        db.add(profile)
+        await db.commit()
+        await db.refresh(profile)
+    except Exception:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create profile.",
+        )
+
+    avatar_url = await s3_client.get_file_url(avatar_key)
 
     return ProfileResponseSchema(
         id=profile.id,
         user_id=user_id,
-        avatar=await s3_client.get_file_url(avatar_key),
+        avatar=avatar_url,
         **profile_fields,
     )
